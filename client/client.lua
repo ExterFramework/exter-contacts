@@ -1,372 +1,301 @@
-local Framework = Config.Framework
-local QBCore = nil
-local ESX = nil
-
-if Framework == 'qbcore' then
-    QBCore = exports[Config.FrameworkFolder]:GetCoreObject()
-elseif Framework == 'esx' then
-    ESX = exports[Config.FrameworkFolder]:getSharedObject()
+local QBCore, ESX
+if Bridge.Framework == 'qbcore' then
+    QBCore = exports[Config.FrameworkFolder or 'qb-core']:GetCoreObject()
+elseif Bridge.Framework == 'qbox' then
+    QBCore = exports.qbx_core:GetCoreObject()
+elseif Bridge.Framework == 'esx' then
+    ESX = exports[Config.FrameworkFolder or 'es_extended']:getSharedObject()
 end
 
 local PlayerData = {}
+local contacts = {}
+local currentDomain
+local cam
 
-if Framework == 'qbcore' then
-    PlayerData = QBCore.Functions.GetPlayerData()
-elseif Framework == 'esx' then
-    ESX.PlayerData = ESX.GetPlayerData()
-    PlayerData = ESX.PlayerData
+local function notify(msg, nType)
+    if Bridge.IsQb and QBCore then
+        QBCore.Functions.Notify(msg, nType or 'primary')
+    elseif Bridge.IsEsx and ESX then
+        ESX.ShowNotification(msg)
+    else
+        print(('[exter-contacts] %s'):format(msg))
+    end
 end
 
-local createdNPCs = {}
-local currentDomain = nil
-
-if Framework == 'qbcore' then
-    RegisterNetEvent('QBCore:Client:OnJobUpdate', function(job)
-        PlayerData.job = job
-    end)
-
-    RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
-        PlayerData = QBCore.Functions.GetPlayerData()
-    end)
-    
-elseif Framework == 'esx' then
-    RegisterNetEvent('esx:setJob', function(job)
-        PlayerData.job = job
-    end)
-
-    RegisterNetEvent('esx:playerLoaded', function(playerData)
-        PlayerData = playerData
-    end)
+local function fetchPlayerData()
+    if Bridge.IsQb and QBCore then
+        PlayerData = QBCore.Functions.GetPlayerData() or {}
+    elseif Bridge.IsEsx and ESX then
+        ESX.PlayerData = ESX.GetPlayerData() or {}
+        PlayerData = ESX.PlayerData
+    else
+        PlayerData = PlayerData or {}
+    end
 end
 
-function getImage(item)
-    if Framework == "qbcore" then
-        if Config.Inventory == "qb-inventory" then 
-            if not QBCore.Shared.Items then return false end
-            if QBCore.Shared.Items[item] and QBCore.Shared.Items[item]['image'] then
-                return Config.InventoryImagesLocation .. QBCore.Shared.Items[item]['image']
-            end
-        
-        elseif Config.Inventory == "OX" then
-            local items = exports.ox_inventory:Items()
-            local itemData = items[item]
-            if itemData then
-                if itemData.name then
-                    local imagePath = Config.InventoryImagesLocation .. itemData.name .. ".png"
-                    return imagePath
-                end
-            else
-                print("Error: Item not found in ox_inventory")
-            end
+local function getItemData(item)
+    if not item then return nil end
+
+    if Bridge.Inventory == 'qb-inventory' and QBCore and QBCore.Shared and QBCore.Shared.Items then
+        return QBCore.Shared.Items[item]
+    end
+
+    if Bridge.Inventory == 'ox_inventory' and exports.ox_inventory then
+        local items = exports.ox_inventory:Items()
+        return items and items[item] or nil
+    end
+
+    return nil
+end
+
+local function getImage(item)
+    local data = getItemData(item)
+    if not data then return false end
+
+    if Config.InventoryImagesLocation ~= 'auto' and Config.InventoryImagesLocation ~= '' then
+        local imageName = data.image or data.name or item
+        if not imageName:find('%.png$') and not imageName:find('%.webp$') then
+            imageName = imageName .. '.png'
+        end
+        return Config.InventoryImagesLocation .. imageName
+    end
+
+    return data.image and data.image or false
+end
+
+local function getLabel(item)
+    local data = getItemData(item)
+    return data and (data.label or data.name) or item
+end
+
+local function deleteAllContacts()
+    for id, ped in pairs(contacts) do
+        if DoesEntityExist(ped) then
+            exports.interact:RemoveLocalEntityInteraction(ped, id)
+            DeleteEntity(ped)
         end
     end
-    return false
-end
-
-
-function getLabel(item)
-    if Framework == "qbcore" then
-        if Config.Inventory == "qb-inventory" then 
-            if not QBCore.Shared.Items then return false end
-            if QBCore.Shared.Items[item] and QBCore.Shared.Items[item]['label'] then
-                return QBCore.Shared.Items[item]['label']
-            end
-        elseif Config.Inventory == "OX" then 
-            local itemData = exports.ox_inventory:Items()[item]
-            if itemData and itemData.label then
-                return itemData.label
-            end
-        end
-    end
-    return false
-end
-
-
-
-function deleteAllNPCs()
-    for _, npcPed in ipairs(createdNPCs) do
-        if DoesEntityExist(npcPed) then
-            DeletePed(npcPed)
-        end
-    end
-    createdNPCs = {}
+    contacts = {}
 end
 
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName then
-        deleteAllNPCs()
+        deleteAllContacts()
     end
 end)
 
-function GetOffsetFromCoordsAndHeading(coords, heading, offsetX, offsetY, offsetZ)
+local function getOffsetFromCoordsAndHeading(coords, heading, offsetX, offsetY, offsetZ)
     local headingRad = math.rad(heading)
     local x = offsetX * math.cos(headingRad) - offsetY * math.sin(headingRad)
     local y = offsetX * math.sin(headingRad) + offsetY * math.cos(headingRad)
-    local z = offsetZ
-
-    local worldCoords = vector4(
-        coords.x + x,
-        coords.y + y,
-        coords.z + z,
-        heading
-    )
-    
-    return worldCoords
+    return vector4(coords.x + x, coords.y + y, coords.z + offsetZ, heading)
 end
 
-function CamCreate(npc)
-    cam = CreateCam('DEFAULT_SCRIPTED_CAMERA')
-    local coordsCam = GetOffsetFromCoordsAndHeading(npc, npc.w, 0.0, 0.7, 1.50)
-    local coordsPly = npc
-    SetCamCoord(cam, coordsCam)
-    PointCamAtCoord(cam, coordsPly['x'], coordsPly['y'], coordsPly['z'] + 1.50)
+local function createCamera(npcCoords)
+    if cam and DoesCamExist(cam) then
+        DestroyCam(cam, false)
+    end
+
+    cam = CreateCam('DEFAULT_SCRIPTED_CAMERA', true)
+    local coordsCam = getOffsetFromCoordsAndHeading(npcCoords, npcCoords.w, 0.0, 0.7, 1.50)
+    SetCamCoord(cam, coordsCam.x, coordsCam.y, coordsCam.z)
+    PointCamAtCoord(cam, npcCoords.x, npcCoords.y, npcCoords.z + 1.50)
     SetCamActive(cam, true)
     RenderScriptCams(true, true, 500, true, true)
 end
 
-function DestroyCamera()
-    RenderScriptCams(false, true, 500, 1, 0)
-    DestroyCam(cam, false)
+local function destroyCamera()
+    if cam and DoesCamExist(cam) then
+        RenderScriptCams(false, true, 500, true, false)
+        DestroyCam(cam, false)
+        cam = nil
+    end
 end
 
-RegisterNetEvent('exter-contacts:getDialogue', function(data)
-    if PlayerData then
-
-        if not data.n.police and PlayerData.job.name == "police" then
-            data.n.text = "Hey Officer. I'm afraid I don't have anything for you, for now."
-            data.n.options = {
-                {
-                    label = "Ok",
-                    event = "e c",
-                    type = "command",
-                    args = {}
-                }
-            }
-        end
-    end
-
-    TriggerEvent("exter-contacts:showMenu", data.n)
-    SetNuiFocus(true, true)
-end)
-
-RegisterNetEvent("exter-contacts:showMenu", function(npc)
-    local domain = npc.domain
-    currentDomain = domain
-    
-    if Framework == 'qbcore' then
-        QBCore.Functions.TriggerCallback('exter-contacts:getRep', function(result)
-            SendNUIMessage({
-                type = "open",
-                ui = 1,
-                options = npc.options,
-                name = npc.name,
-                text = npc.text,
-                rep = tostring(result),
-                domain = npc.domain
-            })
-            CamCreate(npc.coords)
-        end, domain)
-    elseif Framework == 'esx' then
-        ESX.TriggerServerCallback('exter-contacts:getRep', function(result)
-            SendNUIMessage({
-                type = "open",
-                ui = 1,
-                options = npc.options,
-                name = npc.name,
-                text = npc.text,
-                rep = tostring(result),
-                domain = npc.domain
-            })
-            CamCreate(npc.coords)
-        end, domain)
-    end
-end)
-
-RegisterNetEvent("exter-contacts:showTablet", function()
-    if Framework == 'qbcore' then
-        QBCore.Functions.TriggerCallback('exter-contacts:getAllReps', function(result)
-
-            local final = {}
-    
-            for _, npc in ipairs(Config.npcs) do
-                local name = npc.name
-                local domain = npc.domain
-                local coords = npc.coords
-                local private = npc.private or false
-				local hide = npc.hide or false
-                local reputation = result[domain] or 0
-				
-				if not hide then		
-					if private == false or (private == true and result[domain] ~= nil) then
-						table.insert(final, {
-							name = name,
-							domain = domain,
-							coords = coords,
-							reputation = reputation
-						})
-					end
-				end
-            end
-    
-            SendNUIMessage({
-                type = "open",
-                ui = 2,
-                final = final
-            })
-        end)
-    elseif Framework == 'esx' then
-        ESX.TriggerServerCallback('exter-contacts:getAllReps', function(result)
-            local final = {}
-    
-            for _, npc in ipairs(Config.npcs) do
-                local name = npc.name
-                local domain = npc.domain
-                local coords = npc.coords
-                local private = npc.private or false
-                local reputation = result[domain] or 0
-                
-                if private == false or (private == true and result[domain] ~= nil) then
-                    table.insert(final, {
-                        name = name,
-                        domain = domain,
-                        coords = coords,
-                        reputation = reputation
-                    })
-                end
-            end
-    
-            SendNUIMessage({
-                type = "open",
-                ui = 2,
-                final = final
-            })
-        end)
-    end
-    SetNuiFocus(true, true)
-end)
-
-RegisterNUICallback("exter-contacts:hideMenu", function()
-
-    SetNuiFocus(false, false)
-    DestroyCamera()
-    TriggerEvent("exter-tablet:fB2")
-end)
-
-RegisterNUICallback("exter-contacts:setMark", function(data)
-    local x = tonumber(data.x)
-    local y = tonumber(data.y)
-    
-    if x and y then
-        if Framework == 'qbcore' then
-            TriggerEvent("exter-tablet:Notify", 'Contacts', 'Location was Set at your GPS', 'assets/contacts-icon-d58beb8e.png', 5000)
-        elseif Framework == 'esx' then
-            ESX.ShowNotification("Marked the contact on GPS")
-        end
-        SetNewWaypoint(x, y)
-    end
-end)
-
-RegisterNUICallback("buyItem", function(data)
-    TriggerServerEvent("exter-contacts:payItem", data)
-end)
-
-function getRep()
+local function getRep(domain)
     local p = promise.new()
 
-    if Framework == 'qbcore' then
+    if Bridge.IsQb and QBCore then
         QBCore.Functions.TriggerCallback('exter-contacts:getRep', function(result)
-            p:resolve(result)
-        end, currentDomain)
-    elseif Framework == 'esx' then
+            p:resolve(tonumber(result) or 0)
+        end, domain)
+    elseif Bridge.IsEsx and ESX then
         ESX.TriggerServerCallback('exter-contacts:getRep', function(result)
-            p:resolve(result)
-        end, currentDomain)
+            p:resolve(tonumber(result) or 0)
+        end, domain)
+    else
+        p:resolve(0)
     end
 
     return Citizen.Await(p)
 end
 
-RegisterNUICallback("exter-contacts:exe", function(data)
-    local cRep = getRep()
-    if currentDomain and data.requiredrep and data.requiredrep > 0 then
-        if cRep < data.requiredrep then
-            if Framework == 'qbcore' then
-                QBCore.Functions.Notify("You lack reputation for this!", 'error')
-            elseif Framework == 'esx' then
-                ESX.ShowNotification("You lack reputation for this!")
-            end
-            return
+local function sendMenu(npc)
+    currentDomain = npc.domain
+    local rep = getRep(currentDomain)
+
+    SendNUIMessage({
+        type = 'open',
+        ui = 1,
+        options = npc.options or {},
+        name = npc.name or 'Unknown',
+        text = npc.text or '',
+        rep = tostring(rep),
+        domain = npc.domain or 'General'
+    })
+    createCamera(npc.coords)
+    SetNuiFocus(true, true)
+end
+
+local function buildTabletEntries(reputations)
+    local final = {}
+
+    for _, npc in ipairs(Config.npcs or {}) do
+        local private = npc.private or false
+        local hide = npc.hide or false
+        local reputation = reputations[npc.domain] or 0
+
+        if not hide and (not private or reputations[npc.domain] ~= nil) then
+            final[#final + 1] = {
+                name = npc.name,
+                domain = npc.domain,
+                coords = npc.coords,
+                reputation = reputation
+            }
         end
+    end
+
+    return final
+end
+
+RegisterNetEvent('exter-contacts:getDialogue', function(data)
+    local npc = data and data.n
+    if not npc then return end
+
+    if npc.police == false and PlayerData.job and PlayerData.job.name == 'police' then
+        npc = {
+            name = npc.name,
+            domain = npc.domain,
+            coords = npc.coords,
+            text = 'Hey Officer. I am afraid I do not have anything for you right now.',
+            options = {
+                { label = 'Ok', type = 'none', event = '', args = {} }
+            }
+        }
+    end
+
+    sendMenu(npc)
+end)
+
+RegisterNetEvent('exter-contacts:showMenu', sendMenu)
+
+RegisterNetEvent('exter-contacts:showTablet', function()
+    local p = promise.new()
+
+    if Bridge.IsQb and QBCore then
+        QBCore.Functions.TriggerCallback('exter-contacts:getAllReps', function(result)
+            p:resolve(result or {})
+        end)
+    elseif Bridge.IsEsx and ESX then
+        ESX.TriggerServerCallback('exter-contacts:getAllReps', function(result)
+            p:resolve(result or {})
+        end)
+    else
+        p:resolve({})
+    end
+
+    local reps = Citizen.Await(p)
+
+    SendNUIMessage({
+        type = 'open',
+        ui = 2,
+        final = buildTabletEntries(reps)
+    })
+    SetNuiFocus(true, true)
+end)
+
+RegisterNUICallback('exter-contacts:hideMenu', function(_, cb)
+    SetNuiFocus(false, false)
+    destroyCamera()
+    TriggerEvent('exter-tablet:fB2')
+    cb({ ok = true })
+end)
+
+RegisterNUICallback('exter-contacts:setMark', function(data, cb)
+    local x, y = tonumber(data.x), tonumber(data.y)
+    if x and y then
+        SetNewWaypoint(x, y)
+        notify('Location has been set on your GPS.', 'success')
+    end
+    cb({ ok = true })
+end)
+
+RegisterNUICallback('buyItem', function(data, cb)
+    TriggerServerEvent('exter-contacts:payItem', data)
+    cb({ ok = true })
+end)
+
+RegisterNUICallback('exter-contacts:exe', function(data, cb)
+    local cRep = currentDomain and getRep(currentDomain) or 0
+
+    if currentDomain and (tonumber(data.requiredrep) or 0) > cRep then
+        notify('You lack reputation for this option!', 'error')
+        cb({ ok = false, error = 'insufficient_rep' })
+        return
     end
 
     if data.type == 'add' then
-        SendNUIMessage({
-            type = "add",
-            options = data.data.options,
-            text = data.data.text,
-        })
+        SendNUIMessage({ type = 'add', options = data.data.options or {}, text = data.data.text or '' })
+        cb({ ok = true })
         return
     end
+
     if data.type == 'shop' then
-
-
-        local iP = {}
-
-        for i, item in ipairs(data.items) do
-            if item.requiredrep <= cRep then
+        local itemsPayload = {}
+        for _, item in ipairs(data.items or {}) do
+            if (tonumber(item.requiredrep) or 0) <= cRep then
                 item.img = getImage(item.name)
                 item.label = getLabel(item.name)
-                table.insert(iP, item)
+                itemsPayload[#itemsPayload + 1] = item
             end
         end
 
-        SendNUIMessage({
-            type = "shop",
-            items = iP,
-        })
+        SendNUIMessage({ type = 'shop', items = itemsPayload })
+        cb({ ok = true })
         return
     end
-    
+
     SetNuiFocus(false, false)
-    if data.type == 'client' then
-        if not data.args then
-            TriggerEvent(data.event)
-        else
-            TriggerEvent(data.event, json.encode(data.args))
-        end
-    elseif data.type == 'server' then
-        if not data.args then
-            TriggerServerEvent(data.event)
-        else
-            TriggerServerEvent(data.event, json.encode(data.args))
-        end
-    elseif data.type == 'command' then
-        ExecuteCommand(data.event, json.encode(data.args))
+
+    if data.type == 'client' and data.event and data.event ~= '' then
+        TriggerEvent(data.event, data.args)
+    elseif data.type == 'server' and data.event and data.event ~= '' then
+        TriggerServerEvent(data.event, data.args)
+    elseif data.type == 'command' and data.event and data.event ~= '' then
+        ExecuteCommand(data.event)
     end
 
-    DestroyCamera()
+    destroyCamera()
+    cb({ ok = true })
 end)
 
-local contacts = {}
-
 local function createContact(cfg, contactId, label)
-    RequestModel(GetHashKey(cfg.ped))
+    if type(cfg) ~= 'table' or not cfg.coords or not cfg.ped then return false end
 
-    while not HasModelLoaded(GetHashKey(cfg.ped)) do
-        Wait(500)
-    end
+    local model = joaat(cfg.ped)
+    RequestModel(model)
+    while not HasModelLoaded(model) do Wait(50) end
 
-    local npcPed = CreatePed(4, GetHashKey(cfg.ped), cfg.coords.x, cfg.coords.y, cfg.coords.z, cfg.coords.w, false, false)
+    local npcPed = CreatePed(4, model, cfg.coords.x, cfg.coords.y, cfg.coords.z - 1.0, cfg.coords.w, false, false)
     FreezeEntityPosition(npcPed, true)
     SetEntityInvincible(npcPed, true)
     SetBlockingOfNonTemporaryEvents(npcPed, true)
 
-    if cfg.scenario then
+    if cfg.scenario and cfg.scenario ~= '' then
         TaskStartScenarioInPlace(npcPed, cfg.scenario, 0, true)
     end
 
-
-    
+    contactId = contactId or ('contact_%s_%s'):format(cfg.domain or 'domain', math.random(1000, 9999))
     exports.interact:AddLocalEntityInteraction({
         entity = npcPed,
         id = contactId,
@@ -374,123 +303,46 @@ local function createContact(cfg, contactId, label)
         interactDst = 2.0,
         options = {
             {
-                label = label,
-                action = function(entity, coords, args)
-                    TriggerEvent("exter-contacts:getDialogue", args)
+                label = label or 'Talk',
+                action = function(_, _, args)
+                    TriggerEvent('exter-contacts:getDialogue', args)
                 end,
-                args = {
-                    n = cfg,
-                }
-            },
+                args = { n = cfg }
+            }
         }
     })
 
     contacts[contactId] = npcPed
+    return true
 end
 
 local function removeContact(contactId)
     local npcPed = contacts[contactId]
-    if npcPed then
-        exports.interact:RemoveLocalEntityInteraction(npcPed, contactId)
-        
+    if not npcPed then return false end
+
+    exports.interact:RemoveLocalEntityInteraction(npcPed, contactId)
+    if DoesEntityExist(npcPed) then
         DeleteEntity(npcPed)
-        contacts[contactId] = nil
-    else
-        print("No contact found with ID: " .. contactId)
     end
+    contacts[contactId] = nil
+    return true
 end
 
 exports('createContact', createContact)
 exports('removeContact', removeContact)
 
+CreateThread(function()
+    fetchPlayerData()
 
-Citizen.CreateThread(function()
-    for _, npc in ipairs(Config.npcs) do
-        RequestModel(GetHashKey(npc.ped))
-
-        while not HasModelLoaded(GetHashKey(npc.ped)) do
-            Wait(500)
-        end
-
-        local npcPed = CreatePed(4, GetHashKey(npc.ped), npc.coords.x, npc.coords.y, npc.coords.z, npc.coords.w, false, false)
-        FreezeEntityPosition(npcPed, true)
-        SetEntityInvincible(npcPed, true)
-        SetBlockingOfNonTemporaryEvents(npcPed, true)
-
-        if npc.scenario then
-            TaskStartScenarioInPlace(npcPed, npc.scenario, 0, true)
-        end
-
-        
-		
-        exports.interact:AddLocalEntityInteraction({
-            entity = npcPed,
-            id = 'UniqueId' .. tostring(math.random(50, 150)), -- needed for removing interactions
-            distance = 6.0, -- optional
-            interactDst = 2.0, -- optional
-            options = {
-                {
-                    label = 'Talk',
-                    action = function(entity, coords, args)
-                        TriggerEvent("exter-contacts:getDialogue", args)
-                    end,
-                    args = {
-                        n = npc,
-                    }
-                },
-            }
-        })
+    for i, npc in ipairs(Config.npcs or {}) do
+        createContact(npc, ('exter_contact_%d'):format(i), 'Talk')
     end
-end)   
+end)
 
-
---Sample to create temporary NPCs contacts
-
---[[ 
-Citizen.CreateThread(function()
-    local cfg =  {
-        name = "silva tora", 
-		hide = true, 
-        private = true, 
-        text = "Fratello, Wanna rob a bank?", 
-        domain = "Fleeca Heist", 
-        ped = "mp_m_bogdangoon", 
-        scenario = "WORLD_HUMAN_STAND_MOBILE", 
-        police = true,
-        coords = vector4(2398.6882, 5023.3257, 45.0963, 316.6377), 
-        options = {
-            {
-                label = "Tell me more!", 
-                requiredrep = 10, 
-                type = "add", 
-                event = "",
-                data = { 
-                    text = "Ok you gotta do it by night when it's quiet, you'd have 15mins to get everything set in place and time...",
-                    options = {
-                        {
-                            label = "Sounds good", 
-                            event = "exter-contacts:event1", 
-                            type = "client",
-                            args = {} 
-                        },
-                        {
-                            label = "Leave conversation",
-                            event = "", 
-                            type = "none",
-                            args = {} 
-                        },
-                    }
-                },
-                args = {} 
-            },
-            {
-                label = "Leave conversation", 
-                requiredrep = 0, 
-                type = "command", 
-                event = "e c", 
-                args = {}
-            },
-        }
-    }
-    exports["exter-contacts"]:createContact(cfg, "silavtora", "Talk")
-end)  ]]
+if Bridge.IsQb then
+    RegisterNetEvent('QBCore:Client:OnJobUpdate', function(job) PlayerData.job = job end)
+    RegisterNetEvent('QBCore:Client:OnPlayerLoaded', fetchPlayerData)
+elseif Bridge.IsEsx then
+    RegisterNetEvent('esx:setJob', function(job) PlayerData.job = job end)
+    RegisterNetEvent('esx:playerLoaded', function(playerData) PlayerData = playerData or {} end)
+end

@@ -15,7 +15,9 @@ files {
 ui_page 'web/index.html'
 
 shared_scripts {
-	'shared/config.lua'
+	'shared/config.lua',
+	'shared/bridge.lua',
+	'shared/fuel.lua'
 }
 
 client_scripts {
