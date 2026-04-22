@@ -1,167 +1,219 @@
-local Framework = Config.Framework
-local QBCore = nil
-local ESX = nil
-
-if Framework == 'qbcore' then
-    QBCore = exports[Config.FrameworkFolder]:GetCoreObject()
-elseif Framework == 'esx' then
-    ESX = exports[Config.FrameworkFolder]:getSharedObject()
+local QBCore, ESX
+if Bridge.Framework == 'qbcore' then
+    QBCore = exports[Config.FrameworkFolder or 'qb-core']:GetCoreObject()
+elseif Bridge.Framework == 'qbox' then
+    QBCore = exports.qbx_core:GetCoreObject()
+elseif Bridge.Framework == 'esx' then
+    ESX = exports[Config.FrameworkFolder or 'es_extended']:getSharedObject()
 end
 
-function GetAllReputations(citizenId, cb)
-    local rows = MySQL.query.await('SELECT `domain`, `reputation` FROM `reputation` WHERE `citizen_id` = ?', {citizenId})
+local function getPlayer(src)
+    if Bridge.IsQb and QBCore then
+        return QBCore.Functions.GetPlayer(src)
+    elseif Bridge.IsEsx and ESX then
+        return ESX.GetPlayerFromId(src)
+    end
+    return nil
+end
 
-    if rows then
-        local reputations = {}
-        for _, row in ipairs(rows) do
-            reputations[row.domain] = tonumber(row.reputation)
+local function getIdentifier(player)
+    if not player then return nil end
+    if Bridge.IsQb then
+        return player.PlayerData and player.PlayerData.citizenid
+    elseif Bridge.IsEsx then
+        return player.identifier
+    end
+    return tostring(player.source)
+end
+
+local function notify(src, msg, nType)
+    if Bridge.IsQb then
+        TriggerClientEvent('QBCore:Notify', src, msg, nType or 'primary')
+    elseif Bridge.IsEsx then
+        TriggerClientEvent('esx:showNotification', src, msg)
+    else
+        TriggerClientEvent('chat:addMessage', src, { args = { '^3exter-contacts', msg } })
+    end
+end
+
+local function getItemInfo(name)
+    if not name then return nil end
+
+    if Bridge.Inventory == 'qb-inventory' and QBCore and QBCore.Shared and QBCore.Shared.Items then
+        return QBCore.Shared.Items[name]
+    elseif Bridge.Inventory == 'ox_inventory' and exports.ox_inventory then
+        local items = exports.ox_inventory:Items()
+        return items and items[name] or nil
+    end
+
+    return nil
+end
+
+local function addItem(src, player, name, amount)
+    amount = math.max(1, tonumber(amount) or 1)
+
+    if Bridge.Inventory == 'ox_inventory' and exports.ox_inventory then
+        return exports.ox_inventory:AddItem(src, name, amount)
+    end
+
+    if Bridge.IsQb and player then
+        return player.Functions.AddItem(name, amount, false)
+    elseif Bridge.IsEsx and player then
+        return player.addInventoryItem(name, amount)
+    end
+
+    return false
+end
+
+local function removeMoney(player, amount)
+    amount = tonumber(amount) or 0
+    if amount <= 0 then return false end
+
+    if Bridge.IsQb and player then
+        local cash = player.PlayerData.money.cash or 0
+        local bank = player.PlayerData.money.bank or 0
+
+        if cash >= amount then
+            return player.Functions.RemoveMoney('cash', amount, 'contacts-shop')
+        elseif bank >= amount then
+            return player.Functions.RemoveMoney('bank', amount, 'contacts-shop')
         end
-        cb(reputations)
-    else
-        cb({})
+        return false
+    elseif Bridge.IsEsx and player then
+        local cash = player.getMoney()
+        local bank = player.getAccount('bank').money
+
+        if cash >= amount then
+            player.removeMoney(amount)
+            return true
+        elseif bank >= amount then
+            player.removeAccountMoney('bank', amount)
+            return true
+        end
+        return false
     end
+
+    return false
 end
 
-function GetPlayerReputation(citizenId, domain, cb)
-    local row = MySQL.single.await('SELECT `reputation` FROM `reputation` WHERE `citizen_id` = ? AND `domain` = ? LIMIT 1', {
-        citizenId, domain
-    })
+local function getAllReputations(citizenId)
+    local rows = MySQL.query.await('SELECT `domain`, `reputation` FROM `reputation` WHERE `citizen_id` = ?', { citizenId }) or {}
+    local reputations = {}
 
-    if not row then 
-        UpdatePlayerReputation(citizenId, domain, 0)
-        cb(0)
-    else
-        cb(tonumber(row.reputation))
+    for _, row in ipairs(rows) do
+        reputations[row.domain] = tonumber(row.reputation) or 0
     end
+
+    return reputations
 end
 
-function UpdatePlayerReputation(citizenId, domain, newReputation)
+local function updatePlayerReputation(citizenId, domain, newReputation)
     MySQL.insert.await('INSERT INTO `reputation` (citizen_id, domain, reputation) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE reputation = ?', {
         citizenId, domain, newReputation, newReputation
     })
 end
 
-RegisterNetEvent('exter-contacts:modifyRep')
-AddEventHandler('exter-contacts:modifyRep', function(domain, reputationChange)
-    local src = source
-    local player = nil
+local function getPlayerReputation(citizenId, domain)
+    local row = MySQL.single.await('SELECT `reputation` FROM `reputation` WHERE `citizen_id` = ? AND `domain` = ? LIMIT 1', {
+        citizenId, domain
+    })
 
-    if Framework == 'qbcore' then
-        player = QBCore.Functions.GetPlayer(src)
-    elseif Framework == 'esx' then
-        player = ESX.GetPlayerFromId(src)
+    if not row then
+        updatePlayerReputation(citizenId, domain, 0)
+        return 0
     end
 
-    if player then
-        local citizenId = Framework == 'qbcore' and player.PlayerData.citizenid or player.identifier
-        GetPlayerReputation(citizenId, domain, function(currentReputation)
-            local newReputation = math.max(0, currentReputation + reputationChange)
-            UpdatePlayerReputation(citizenId, domain, newReputation)
-        end)
-    end
-end)
-
-local function modifyReputation(id, domain, reputationChange)
-    local player = nil
-
-    if Framework == 'qbcore' then
-        player = QBCore.Functions.GetPlayer(id)
-    elseif Framework == 'esx' then
-        player = ESX.GetPlayerFromId(id)
-    end
-
-    if player then
-        local citizenId = Framework == 'qbcore' and player.PlayerData.citizenid or player.identifier
-        GetPlayerReputation(citizenId, domain, function(currentReputation)
-            local newReputation = math.max(0, currentReputation + reputationChange)
-            UpdatePlayerReputation(citizenId, domain, newReputation)
-        end)
-    end
+    return tonumber(row.reputation) or 0
 end
 
-RegisterNetEvent('exter-contacts:modifyRepS')
-AddEventHandler('exter-contacts:modifyRepS', function(id, domain, reputationChange)
-    modifyReputation(id, domain, reputationChange)
+local function modifyReputation(src, domain, reputationChange)
+    local player = getPlayer(src)
+    if not player or type(domain) ~= 'string' then return false end
+
+    local identifier = getIdentifier(player)
+    if not identifier then return false end
+
+    local current = getPlayerReputation(identifier, domain)
+    local newReputation = math.max(0, current + (tonumber(reputationChange) or 0))
+    updatePlayerReputation(identifier, domain, newReputation)
+    return true
+end
+
+RegisterNetEvent('exter-contacts:modifyRep', function(domain, reputationChange)
+    modifyReputation(source, domain, reputationChange)
 end)
+
+RegisterNetEvent('exter-contacts:modifyRepS', function(id, domain, reputationChange)
+    modifyReputation(tonumber(id) or id, domain, reputationChange)
+end)
+
 exports('modifyReputation', modifyReputation)
 
-
-RegisterNetEvent('exter-contacts:payItem')
-AddEventHandler('exter-contacts:payItem', function(data)
-    local player = nil
+RegisterNetEvent('exter-contacts:payItem', function(data)
     local src = source
-    local cart = data.cart
+    local player = getPlayer(src)
+    if not player then return end
 
-    if Framework == 'qbcore' then
-        player = QBCore.Functions.GetPlayer(src)
+    local cart = type(data) == 'table' and data.cart or nil
+    if type(cart) ~= 'table' or #cart == 0 then
+        notify(src, 'Invalid shopping cart payload.', 'error')
+        return
+    end
 
+    for _, item in ipairs(cart) do
+        local qty = math.max(1, tonumber(item.quantity) or 1)
+        local unitPrice = math.max(0, tonumber(item.price) or 0)
+        local price = qty * unitPrice
+        local itemName = tostring(item.name or '')
 
-        for i, item in ipairs(cart) do
-            
-            local qte = item.quantity
-            local price = item.price * qte
-            local name = item.name
-
-
-            if player.PlayerData.money.cash >= price then
-
-                player.Functions.RemoveMoney("cash", price)
-
-                TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items[name], "add", qte) 
-                player.Functions.AddItem(name, qte, false)
-
-                TriggerClientEvent("QBCore:Notify", src, "You bought "..name, "success")
-
-
-            elseif player.PlayerData.money.bank >= price then
-                player.Functions.RemoveMoney("bank", price)
-                TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items[name], "add", qte) 
-                player.Functions.AddItem(name, qte, false)
-                TriggerClientEvent("QBCore:Notify", src, "You bought "..name, "success")
-            else
-                TriggerClientEvent("QBCore:Notify", src, "You are missing some cash.", "error")
-            end
-
+        if itemName == '' then
+            notify(src, 'Invalid item in cart.', 'error')
+            goto continue
         end
-    elseif Framework == 'esx' then
-        player = ESX.GetPlayerFromId(src)
+
+        if not removeMoney(player, price) then
+            notify(src, ('Not enough money for %s.'):format(itemName), 'error')
+            goto continue
+        end
+
+        local added = addItem(src, player, itemName, qty)
+        if not added then
+            notify(src, ('Failed to add %s x%d.'):format(itemName, qty), 'error')
+            goto continue
+        end
+
+        local itemInfo = getItemInfo(itemName)
+        if Bridge.IsQb and itemInfo then
+            TriggerClientEvent('inventory:client:ItemBox', src, itemInfo, 'add', qty)
+        end
+
+        notify(src, ('Purchased %s x%d'):format(itemName, qty), 'success')
+        ::continue::
     end
 end)
 
-if Framework == 'qbcore' then
+if Bridge.IsQb and QBCore then
     QBCore.Functions.CreateCallback('exter-contacts:getRep', function(source, cb, domain)
-        local player = QBCore.Functions.GetPlayer(source)
-        if player then
-            GetPlayerReputation(player.PlayerData.citizenid, domain, cb)
-        else
-            cb(0)
-        end
+        local player = getPlayer(source)
+        local identifier = getIdentifier(player)
+        cb(identifier and getPlayerReputation(identifier, domain) or 0)
     end)
 
     QBCore.Functions.CreateCallback('exter-contacts:getAllReps', function(source, cb)
-        local player = QBCore.Functions.GetPlayer(source)
-        if player then
-            GetAllReputations(player.PlayerData.citizenid, cb)
-        else
-            cb({})
-        end
+        local player = getPlayer(source)
+        local identifier = getIdentifier(player)
+        cb(identifier and getAllReputations(identifier) or {})
     end)
-elseif Framework == 'esx' then
+elseif Bridge.IsEsx and ESX then
     ESX.RegisterServerCallback('exter-contacts:getRep', function(source, cb, domain)
-        local player = ESX.GetPlayerFromId(source)
-        if player then
-            GetPlayerReputation(player.identifier, domain, cb)
-        else
-            cb(0) 
-        end
+        local player = getPlayer(source)
+        local identifier = getIdentifier(player)
+        cb(identifier and getPlayerReputation(identifier, domain) or 0)
     end)
 
     ESX.RegisterServerCallback('exter-contacts:getAllReps', function(source, cb)
-        local player = ESX.GetPlayerFromId(source)
-        if player then
-            GetAllReputations(player.identifier, cb)
-        else
-            cb({})
-        end
+        local player = getPlayer(source)
+        local identifier = getIdentifier(player)
+        cb(identifier and getAllReputations(identifier) or {})
     end)
 end

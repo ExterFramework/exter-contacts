@@ -1,9 +1,12 @@
 Config = {}
  
-Config.Framework = 'qbcore'
-Config.FrameworkFolder = 'qb-core' -- qb-core or es_extended
-Config.Inventory = "qb-inventory" -- "qb-inventory" or "OX"
-Config.InventoryImagesLocation = 'https://cfx-nui-qb-inventory/html/images/' -- https://cfx-nui-qb-inventory/html/images/ | https://cfx-nui-ox_inventory/web/images/
+Config.Framework = 'auto' -- auto | qbcore | qbox | esx | standalone
+Config.FrameworkFolder = 'qb-core' -- legacy override for qb-core/es_extended export name
+Config.Inventory = 'auto' -- auto | qb-inventory | ox_inventory | esx_inventory | qs-inventory | standalone
+Config.InventoryImagesLocation = 'auto' -- auto uses inventory defaults
+Config.FuelSystem = 'auto' -- auto | LegacyFuel | CDN-Fuel | ox_fuel | qb-fuel | none
+Config.Debug = false
+
 Config.npcs = {
     {
         name = "Tony Soprano", -- NPC name
